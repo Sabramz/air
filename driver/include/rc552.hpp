@@ -233,9 +233,9 @@ private:
 	gpiod::line interrupt;
 	std::unique_ptr<std::thread> interrupt_thread;
 	std::atomic_bool active = true;
-	spi spid;
 	gpiod::line csLine;
 	gpiod::line rstLine;
+	spi spid;
 
 	/**
 	 * @brief Validate CRC A

@@ -12,6 +12,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <gpiod.hpp>
+
 class spi {
 public:
 	/**
@@ -22,7 +24,11 @@ public:
 	 * @param[in] speed - SPI speed
 	 * @param[in] adapter - The number of the I2C adapter.
 	 */
-	spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter);
+	spi(uint8_t mode,
+		uint8_t bpw,
+		uint32_t speed,
+		gpiod::line csLine,
+		char *adapter);
 
 	~spi();
 
@@ -53,4 +59,5 @@ private:
 	int fd;
 	uint8_t bpw;
 	uint32_t speed;
+	gpiod::line csLine;
 };

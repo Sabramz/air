@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <linux/spi/spidev.h>
 
 #include "defines.hpp"
 
@@ -93,9 +94,9 @@ rc552::rc552(const gpiod::chip &chip,
 	std::string adapter)
 	: uid(4, {0}, 0),
 	  interrupt(chip.get_line(inter_pin)),
-	  spid(spi(0, 8, 100000U, adapter.data())),
 	  csLine(chip.get_line(csPin)),
-	  rstLine(chip.get_line(rstPin)) {
+	  rstLine(chip.get_line(rstPin)),
+	  spid(spi(SPI_MODE_0, 8, 100000U * 8, csLine, adapter.data())) {
 	interrupt.request({
 		.consumer = GPIO_CONSUMER,
 		.request_type = gpiod::line_request::EVENT_RISING_EDGE,
@@ -107,6 +108,8 @@ rc552::rc552(const gpiod::chip &chip,
 		.request_type = gpiod::line_request::DIRECTION_OUTPUT,
 		.flags = 0,
 	});
+
+	csLine.set_value(1);
 
 	rstLine.request({.consumer = GPIO_CONSUMER,
 		.request_type = gpiod::line_request::DIRECTION_INPUT,
@@ -127,6 +130,8 @@ rc552::rc552(const gpiod::chip &chip,
 		hardReset = true;
 	}
 
+	csLine.set_value(0);
+
 	if (!hardReset) {
 		spid.write_byte(commandReg, PCD_SoftReset);
 		// The datasheet does not mention how long the SoftRest command takes to
@@ -145,7 +150,8 @@ rc552::rc552(const gpiod::chip &chip,
 	// Chesk to see if spi is working
 	uint8_t res = spid.read_byte(errorReg);
 	if (res != 0x80) {
-		throw std::runtime_error("RC552 spi read failure");
+		throw std::runtime_error(
+			"RC552 spi read failure " + std::to_string(res));
 	}
 
 	// Reset baud rates

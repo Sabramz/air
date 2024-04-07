@@ -14,9 +14,14 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-spi::spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter)
+spi::spi(uint8_t mode,
+	uint8_t bpw,
+	uint32_t speed,
+	gpiod::line chipSel,
+	char *adapter)
 	: bpw(bpw),
-	  speed(speed) {
+	  speed(speed),
+	  csLine(chipSel) {
 	char filename[32];
 
 	snprintf(filename, 32, "/dev/spidev%s", adapter);
@@ -75,15 +80,23 @@ int spi::transfer(
 		.rx_buf = (uint64_t)read_buf,
 		.len = buf_len,
 		.speed_hz = speed,
+        .delay_usecs = 0,
 		.bits_per_word = bpw,
-		.cs_change = 1};
+		.cs_change = 0,
+		.tx_nbits = 0,
+		.rx_nbits = 0};
 	int res;
+
+	csLine.set_value(0);
 
 	res = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
 	if (res < 0) {
-		printf("%s: failed to start SPI transfer\r\n", __func__);
-		return res;
+		std::string res_str = std::to_string(res);
+		throw std::runtime_error(
+			std::string("SPI TRANSFER FAIL CODE ") + res_str);
 	}
+
+	csLine.set_value(1);
 
 	return res;
 }
@@ -118,8 +131,8 @@ uint8_t spi::read_byte(uint8_t reg) const {
 	uint8_t data = 0;
 	int res = readn(reg, &data, 1);
 	if (res != 0) {
-		printf(" %d ", res);
-		throw std::runtime_error("SPI read fail");
+		std::string res_str = std::to_string(res);
+		throw std::runtime_error(std::string("SPI read fail ") + res_str);
 	}
 	return data;
 }
