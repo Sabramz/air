@@ -112,7 +112,7 @@ int spi::readn(uint8_t reg, uint8_t *buf, int buf_len) const {
 	full_buf_len = buf_len + 2;
 	uint8_t full_buf[full_buf_len];
 	full_buf[0] = 0x0B;
-	full_buf[1] = reg;
+	full_buf[1] = 0x80 | reg;
 
 	/*
 	 * Transfer the instruction, register address and data.
