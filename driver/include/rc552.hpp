@@ -35,7 +35,11 @@ public:
 	 * @param[in] dev_addr - I2C device address.
 	 * @param[in] adapter - I2C ioctl adapter number.
 	 */
-	rc552(const gpiod::chip &chip, uint32_t inter_pin, std::string adapter);
+	rc552(const gpiod::chip &chip,
+		uint32_t inter_pin,
+		uint32_t csPin,
+		uint32_t rstPin,
+		std::string adapter);
 
 	~rc552();
 
@@ -137,12 +141,6 @@ public:
 							///< bytes returned if STATUS_OK.
 	);
 
-	void PCD_WriteRegister(
-		uint8_t
-			reg, ///< The register to write to. One of the PCD_Register enums.
-		uint8_t value ///< The value to write.
-	);
-
 	/**
 	 * Simple wrapper around PICC_Select.
 	 * Returns true if a UID could be read.
@@ -175,7 +173,7 @@ public:
 	 *
 	 * @return STATUS_OK on success, STATUS_??? otherwise.
 	 */
-	int PICC_Select(uint8_t validBits = 0);
+	int PICC_Select(uint8_t validBits);
 
 	/**
 	 * Instructs a PICC in state ACTIVE(*) to go to state HALT.
@@ -236,6 +234,8 @@ private:
 	std::unique_ptr<std::thread> interrupt_thread;
 	std::atomic_bool active = true;
 	spi spid;
+	gpiod::line csLine;
+	gpiod::line rstLine;
 
 	/**
 	 * @brief Validate CRC A

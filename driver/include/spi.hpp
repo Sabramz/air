@@ -41,9 +41,9 @@ public:
 	 * @return - 0 if the read procedure succeeded
 	 *         - negative if the read procedure failed
 	 */
-	int read(uint8_t reg, uint8_t *buf, int buf_len) const;
+	int readn(uint8_t reg, uint8_t *buf, int buf_len) const;
 
-	int write(uint8_t reg, uint8_t *buf, int buf_len) const;
+	int writen(uint8_t reg, uint8_t *buf, int buf_len) const;
 
 	uint8_t read_byte(uint8_t reg) const;
 

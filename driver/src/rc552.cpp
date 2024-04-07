@@ -22,11 +22,26 @@ static constexpr uint8_t Status2Reg =
 static constexpr uint8_t FIFODataReg = 0x09 << 1;
 static constexpr uint8_t FIFOLevelReg = 0x0A << 1;
 static constexpr uint8_t controlReg = 0x0C << 1;
+static constexpr uint8_t ModeReg =
+	0x11 << 1; // defines general modes for transmitting and receiving
 static constexpr uint8_t TxModeReg = 0x12 << 1;
 static constexpr uint8_t RxModeReg = 0x13 << 1;
+static constexpr uint8_t TxControlReg =
+	0x14 << 1; // controls the logical behavior of the
+			   // antenna driver pins TX1 and TX2
+static constexpr uint8_t TxASKReg =
+	0x15 << 1; // controls the setting of the transmission modulation
 static constexpr uint8_t CRCResultRegH = 0x21 << 1;
 static constexpr uint8_t CRCResultRegL = 0x22 << 1;
 static constexpr uint8_t ModWidthReg = 0x24 << 1;
+static constexpr uint8_t TModeReg =
+	0x2A << 1; // defines settings for the internal timer
+static constexpr uint8_t TPrescalerReg =
+	0x2B << 1; // the lower 8 bits of the TPrescaler value. The 4 high bits are
+			   // in TModeReg.
+static constexpr uint8_t TReloadRegH =
+	0x2C << 1; // defines the 16-bit timer reload value
+static constexpr uint8_t TReloadRegL = 0x2D << 1;
 static constexpr uint8_t bitFramingReg = 0x0D << 1;
 // bit position of the first bit-collision detected on the RF interface
 static constexpr uint8_t collReg = 0x0E << 1;
@@ -42,6 +57,7 @@ static constexpr uint8_t calcCRC = 0b0011;
 static constexpr uint8_t transcieve = 0b1100;
 static constexpr uint8_t PCD_MFAuthent =
 	0x0E; // performs the MIFARE standard authentication as a reader
+static constexpr uint8_t PCD_SoftReset = 0x0F;
 
 // MIFARE commands
 
@@ -53,24 +69,117 @@ static constexpr uint8_t PICC_CMD_HLTA =
 	0x50; // HaLT command, Type A. Instructs an ACTIVE PICC to go to state HALT.
 static constexpr uint8_t PICC_CMD_MF_AUTH_KEY_A =
 	0x60; // Perform authentication with Key A
+static constexpr uint8_t PICC_CMD_CT =
+	0x88; // Cascade Tag. Not really a command, but used during anti collision.
+static constexpr uint8_t PICC_CMD_SEL_CL1 =
+	0x93; // Anti collision/Select, Cascade Level 1
+static constexpr uint8_t PICC_CMD_SEL_CL2 =
+	0x95; // Anti collision/Select, Cascade Level 2
+static constexpr uint8_t PICC_CMD_SEL_CL3 =
+	0x97; // Anti collision/Select, Cascade Level 3
 
 static constexpr int STATUS_OK = 0;
 static constexpr int STATUS_TIMEOUT = 1;
 static constexpr int STATUS_ERROR = 2;
+static constexpr int STATUS_INVALID = 3;
+static constexpr int STATUS_INTERNAL_ERROR = 4;
+static constexpr int STATUS_COLLISION = 5;
+static constexpr int STATUS_CRC_WRONG = 6;
 
-rc552::rc552(const gpiod::chip &chip, uint32_t inter_pin, std::string adapter)
+rc552::rc552(const gpiod::chip &chip,
+	uint32_t inter_pin,
+	uint32_t csPin,
+	uint32_t rstPin,
+	std::string adapter)
 	: uid(4, {0}, 0),
 	  interrupt(chip.get_line(inter_pin)),
-	  spid(spi(0, 8, 4000000U, adapter.data())) {
+	  spid(spi(0, 8, 100000U, adapter.data())),
+	  csLine(chip.get_line(csPin)),
+	  rstLine(chip.get_line(rstPin)) {
 	interrupt.request({
 		.consumer = GPIO_CONSUMER,
 		.request_type = gpiod::line_request::EVENT_RISING_EDGE,
 		.flags = 0,
 	});
 
+	csLine.request({
+		.consumer = GPIO_CONSUMER,
+		.request_type = gpiod::line_request::DIRECTION_OUTPUT,
+		.flags = 0,
+	});
+
+	rstLine.request({.consumer = GPIO_CONSUMER,
+		.request_type = gpiod::line_request::DIRECTION_INPUT,
+		.flags = 0});
+
+	bool hardReset = false;
+
+	// see if chip needs hard reset
+	if (rstLine.get_value() == 0) {
+		rstLine.request({.consumer = GPIO_CONSUMER,
+			.request_type = gpiod::line_request::DIRECTION_OUTPUT,
+			.flags = 0});
+
+		rstLine.set_value(0);
+		std::this_thread::sleep_for(std::chrono::microseconds(2));
+		rstLine.set_value(1);
+		std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		hardReset = true;
+	}
+
+	if (!hardReset) {
+		spid.write_byte(commandReg, PCD_SoftReset);
+		// The datasheet does not mention how long the SoftRest command takes to
+		// complete. But the MFRC522 might have been in soft power-down mode
+		// (triggered by bit 4 of CommandReg) Section 8.8.2 in the datasheet
+		// says the oscillator start-up time is the start up time of the crystal
+		// + 37,74μs. Let us be generous: 50ms.
+		uint8_t count = 0;
+		do {
+			// Wait for the PowerDown bit in CommandReg to be cleared (max
+			// 3x50ms)
+			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+		} while ((spid.read_byte(commandReg) & (1 << 4)) && (++count) < 3);
+	}
+
+	// Chesk to see if spi is working
 	uint8_t res = spid.read_byte(errorReg);
 	if (res != 0x80) {
 		throw std::runtime_error("RC552 spi read failure");
+	}
+
+	// Reset baud rates
+	spid.write_byte(TxModeReg, 0x00);
+	spid.write_byte(RxModeReg, 0x00);
+	// Reset ModWidthReg
+	spid.write_byte(ModWidthReg, 0x26);
+
+	// When communicating with a PICC we need a timeout if something goes wrong.
+	// f_timer = 13.56 MHz / (2*TPreScaler+1) where TPreScaler =
+	// [TPrescaler_Hi:TPrescaler_Lo]. TPrescaler_Hi are the four low bits in
+	// TModeReg. TPrescaler_Lo is TPrescalerReg.
+	spid.write_byte(TModeReg,
+		0x80); // TAuto=1; timer starts automatically at the end of the
+			   // transmission in all communication modes at all speeds
+	spid.write_byte(TPrescalerReg,
+		0xA9); // TPreScaler = TModeReg[3..0]:TPrescalerReg, ie 0x0A9 = 169 =>
+			   // f_timer=40kHz, ie a timer period of 25μs.
+	spid.write_byte(TReloadRegH,
+		0x03); // Reload timer with 0x3E8 = 1000, ie 25ms before timeout.
+	spid.write_byte(TReloadRegL, 0xE8);
+
+	spid.write_byte(
+		TxASKReg, 0x40); // Default 0x00. Force a 100 % ASK modulation
+						 // independent of the ModGsPReg register setting
+	spid.write_byte(ModeReg,
+		0x3D); // Default 0x3F. Set the preset value for the CRC coprocessor for
+			   // the CalcCRC command to 0x6363 (ISO 14443-3 part 6.2.4)
+
+	// Enable the antenna driver pins TX1 and TX2 (they were
+	// disabled by the reset)
+	uint8_t value = spid.read_byte(TxControlReg);
+	if ((value & 0x03) != 0x03) {
+		spid.write_byte(TxControlReg, value | 0x03);
 	}
 }
 
@@ -154,9 +263,9 @@ int rc552::PCD_CommunicateWithPICC(uint8_t command,
 	uint8_t flushFifo = 0x80;
 	// FlushBuffer = 1, FIFO initialization
 	spid.write_byte(FIFOLevelReg, flushFifo);
-	spid.write(FIFODataReg, sendData, sendLen); // Write sendData to the FIFO
-	spid.write_byte(bitFramingReg, bitFraming); // Bit adjustments
-	spid.write_byte(commandReg, command);       // Execute the command
+	spid.writen(FIFODataReg, sendData, sendLen); // Write sendData to the FIFO
+	spid.write_byte(bitFramingReg, bitFraming);  // Bit adjustments
+	spid.write_byte(commandReg, command);        // Execute the command
 	if (command == transcieve) {
 		// StartSend=1, transmission of data starts
 		setRegisterBitMask(bitFramingReg, 0x80);
@@ -209,7 +318,7 @@ int rc552::PCD_CommunicateWithPICC(uint8_t command,
 			return 5; // no room
 		}
 		*backLen = fifoLevel; // Number of bytes returned
-		spid.read(
+		spid.readn(
 			FIFODataReg, backData, fifoLevel); // Get received data from FIFO
 		// RxLastBits[2:0] indicates the number of valid bits
 		_validBits = uint8_t(controlReg) & 0x07;
@@ -245,8 +354,8 @@ int rc552::calculateCRC(uint8_t *data, uint8_t length, uint8_t *result) {
 	spid.write_byte(divIqrReg, clear_inters);
 	// FlushBuffer = 1, FIFO initialization
 	spid.write_byte(FIFOLevelReg, flush_buffer);
-	spid.write(FIFODataReg, data, length); // Write data to the FIFO
-	spid.write_byte(commandReg, calcCRC);  // Start the calculation
+	spid.writen(FIFODataReg, data, length); // Write data to the FIFO
+	spid.write_byte(commandReg, calcCRC);   // Start the calculation
 
 	// Wait for the CRC calculation to complete. Check for the register to
 	// indicate that the CRC calculation is complete in a loop. If the
@@ -319,10 +428,10 @@ bool rc552::PICC_IsNewCardPresent() {
 	uint8_t bufferSize = sizeof(bufferATQA);
 
 	// Reset baud rates
-	PCD_WriteRegister(TxModeReg, 0x00);
-	PCD_WriteRegister(RxModeReg, 0x00);
+	spid.write_byte(TxModeReg, 0x00);
+	spid.write_byte(RxModeReg, 0x00);
 	// Reset ModWidthReg
-	PCD_WriteRegister(ModWidthReg, 0x26);
+	spid.write_byte(ModWidthReg, 0x26);
 
 	int result = PICC_RequestA(bufferATQA, &bufferSize);
 	return result == 0 || result == 1;
@@ -377,7 +486,7 @@ void rc552::PCD_ClearRegisterBitMask(
 	uint8_t mask ///< The bits to clear.
 ) {
 	uint8_t tmp;
-	spid.read(reg, &tmp, 1);
+	spid.readn(reg, &tmp, 1);
 	uint8_t clear = tmp & (~mask);
 	spid.write_byte(reg, clear); // clear bit mask
 } // End PCD_ClearRegisterBitMask()
@@ -391,7 +500,7 @@ void rc552::PCD_ClearRegisterBitMask(
  * @return bool
  */
 bool rc552::PICC_ReadCardSerial() {
-	int result = PICC_Select();
+	int result = PICC_Select(0);
 	return result == 0;
 } // End
 
@@ -659,3 +768,281 @@ int rc552::PCD_Authenticate(
 	return PCD_CommunicateWithPICC(PCD_MFAuthent, waitIRq, &sendData[0],
 		sizeof(sendData), nullptr, nullptr, nullptr, 0, false);
 } // End PCD_Authenticate()
+
+/**
+ * Transmits SELECT/ANTICOLLISION commands to select a single PICC.
+ * Before calling this function the PICCs must be placed in the READY(*) state
+ * by calling PICC_RequestA() or PICC_WakeupA(). On success:
+ * 		- The chosen PICC is in state ACTIVE(*) and all other PICCs have
+ * returned to state IDLE/HALT. (Figure 7 of the ISO/IEC 14443-3 draft.)
+ * 		- The UID size and value of the chosen PICC is returned in *uid along
+ * with the SAK.
+ *
+ * A PICC UID consists of 4, 7 or 10 bytes.
+ * Only 4 bytes can be specified in a SELECT command, so for the longer UIDs two
+ * or three iterations are used: UID size	Number of UID bytes		Cascade
+ * levels		Example of PICC
+ * 		========	===================		==============		===============
+ * 		single				 4						1				MIFARE
+ * Classic double				 7						2				MIFARE
+ * Ultralight triple				10						3				Not
+ * currently in use?
+ *
+ * @return STATUS_OK on success, STATUS_??? otherwise.
+ */
+int rc552::PICC_Select(
+	uint8_t validBits =
+		0 ///< The number of known UID bits supplied in *uid. Normally 0. If set
+		  ///< you must also supply uid->size.
+) {
+	bool uidComplete;
+	bool selectDone;
+	bool useCascadeTag;
+	uint8_t cascadeLevel = 1;
+	int result;
+	uint8_t count;
+	uint8_t checkBit;
+	uint8_t index;
+	uint8_t uidIndex; // The first index in uid->uidByte[] that is used in the
+					  // current Cascade Level.
+	int8_t currentLevelKnownBits; // The number of known UID bits in the current
+								  // Cascade Level.
+	uint8_t buffer[9];  // The SELECT/ANTICOLLISION commands uses a 7 byte
+						// standard frame + 2 bytes CRC_A
+	uint8_t bufferUsed; // The number of bytes used in the buffer, ie the number
+						// of bytes to transfer to the FIFO.
+	uint8_t rxAlign; // Used in BitFramingReg. Defines the bit position for the
+					 // first bit received.
+	uint8_t txLastBits; // Used in BitFramingReg. The number of valid bits in
+						// the last transmitted byte.
+	uint8_t *responseBuffer;
+	uint8_t responseLength;
+
+	// Description of buffer structure:
+	//		Byte 0: SEL 				Indicates the Cascade Level:
+	// PICC_CMD_SEL_CL1, PICC_CMD_SEL_CL2 or PICC_CMD_SEL_CL3 		Byte 1: NVB
+	// Number of Valid Bits (in complete command, not just the UID): High
+	// nibble: complete bytes, Low nibble: Extra bits. 		Byte 2: UID-data or
+	// CT		See explanation below. CT means Cascade Tag. 		Byte 3:
+	// UID-data 		Byte 4: UID-data 		Byte 5: UID-data 		Byte 6:
+	// BCC
+	// Block Check Character - XOR of bytes 2-5 		Byte 7: CRC_A 		Byte
+	// 8: CRC_A
+	// The BCC and CRC_A are only transmitted if we know all the UID bits of the
+	// current Cascade Level.
+	//
+	// Description of bytes 2-5: (Section 6.5.4 of the ISO/IEC 14443-3 draft:
+	// UID contents and cascade levels)
+	//		UID size	Cascade level	Byte2	Byte3	Byte4	Byte5
+	//		========	=============	=====	=====	=====	=====
+	//		 4 bytes		1			uid0	uid1	uid2	uid3
+	//		 7 bytes		1			CT		uid0	uid1	uid2
+	//						2			uid3	uid4	uid5	uid6
+	//		10 bytes		1			CT		uid0	uid1	uid2
+	//						2			CT		uid3	uid4	uid5
+	//						3			uid6	uid7	uid8	uid9
+
+	// Sanity checks
+	if (validBits > 80) {
+		return STATUS_INVALID;
+	}
+
+	// Prepare MFRC522
+	PCD_ClearRegisterBitMask(
+		collReg, 0x80); // ValuesAfterColl=1 => Bits received after collision
+						// are cleared.
+
+	// Repeat Cascade Level loop until we have a complete UID.
+	uidComplete = false;
+	while (!uidComplete) {
+		// Set the Cascade Level in the SEL byte, find out if we need to use the
+		// Cascade Tag in byte 2.
+		switch (cascadeLevel) {
+		case 1:
+			buffer[0] = PICC_CMD_SEL_CL1;
+			uidIndex = 0;
+			useCascadeTag =
+				validBits &&
+				uid.size > 4; // When we know that the UID has more than 4 bytes
+			break;
+
+		case 2:
+			buffer[0] = PICC_CMD_SEL_CL2;
+			uidIndex = 3;
+			useCascadeTag =
+				validBits &&
+				uid.size > 7; // When we know that the UID has more than 7 bytes
+			break;
+
+		case 3:
+			buffer[0] = PICC_CMD_SEL_CL3;
+			uidIndex = 6;
+			useCascadeTag = false; // Never used in CL3.
+			break;
+
+		default:
+			return STATUS_INTERNAL_ERROR;
+			break;
+		}
+
+		// How many UID bits are known in this Cascade Level?
+		currentLevelKnownBits = validBits - (8 * uidIndex);
+		if (currentLevelKnownBits < 0) {
+			currentLevelKnownBits = 0;
+		}
+		// Copy the known bits from uid->uidByte[] to buffer[]
+		index = 2; // destination index in buffer[]
+		if (useCascadeTag) {
+			buffer[index++] = PICC_CMD_CT;
+		}
+		uint8_t bytesToCopy =
+			currentLevelKnownBits / 8 +
+			(currentLevelKnownBits % 8
+					? 1
+					: 0); // The number of bytes needed to represent the known
+						  // bits for this level.
+		if (bytesToCopy) {
+			uint8_t maxBytes =
+				useCascadeTag ? 3 : 4; // Max 4 bytes in each Cascade Level.
+									   // Only 3 left if we use the Cascade Tag
+			if (bytesToCopy > maxBytes) {
+				bytesToCopy = maxBytes;
+			}
+			for (count = 0; count < bytesToCopy; count++) {
+				buffer[index++] = uid.uidByte[uidIndex + count];
+			}
+		}
+		// Now that the data has been copied we need to include the 8 bits in CT
+		// in currentLevelKnownBits
+		if (useCascadeTag) {
+			currentLevelKnownBits += 8;
+		}
+
+		// Repeat anti collision loop until we can transmit all UID bits + BCC
+		// and receive a SAK - max 32 iterations.
+		selectDone = false;
+		while (!selectDone) {
+			// Find out how many bits and bytes to send and receive.
+			if (currentLevelKnownBits >=
+				32) { // All UID bits in this Cascade Level are known. This is a
+					  // SELECT.
+				// Serial.print(F("SELECT: currentLevelKnownBits="));
+				// Serial.println(currentLevelKnownBits, DEC);
+				buffer[1] =
+					0x70; // NVB - Number of Valid Bits: Seven whole bytes
+				// Calculate BCC - Block Check Character
+				buffer[6] = buffer[2] ^ buffer[3] ^ buffer[4] ^ buffer[5];
+				// Calculate CRC_A
+				result = calculateCRC(buffer, 7, &buffer[7]);
+				if (result != STATUS_OK) {
+					return result;
+				}
+				txLastBits = 0; // 0 => All 8 bits are valid.
+				bufferUsed = 9;
+				// Store response in the last 3 bytes of buffer (BCC and CRC_A -
+				// not needed after tx)
+				responseBuffer = &buffer[6];
+				responseLength = 3;
+			} else { // This is an ANTICOLLISION.
+				// Serial.print(F("ANTICOLLISION: currentLevelKnownBits="));
+				// Serial.println(currentLevelKnownBits, DEC);
+				txLastBits = currentLevelKnownBits % 8;
+				count = currentLevelKnownBits /
+						8;         // Number of whole bytes in the UID part.
+				index = 2 + count; // Number of whole bytes: SEL + NVB + UIDs
+				buffer[1] =
+					(index << 4) + txLastBits; // NVB - Number of Valid Bits
+				bufferUsed = index + (txLastBits ? 1 : 0);
+				// Store response in the unused part of buffer
+				responseBuffer = &buffer[index];
+				responseLength = sizeof(buffer) - index;
+			}
+
+			// Set bit adjustments
+			rxAlign = txLastBits; // Having a separate variable is overkill. But
+								  // it makes the next line easier to read.
+			spid.write_byte(bitFramingReg,
+				(rxAlign << 4) +
+					txLastBits); // RxAlign = BitFramingReg[6..4]. TxLastBits =
+								 // BitFramingReg[2..0]
+
+			// Transmit the buffer and receive the response.
+			result = transcieveData(buffer, bufferUsed, responseBuffer,
+				&responseLength, &txLastBits, rxAlign);
+			if (result == STATUS_COLLISION) { // More than one PICC in the field
+											  // => collision.
+				uint8_t valueOfCollReg = spid.read_byte(
+					collReg); // CollReg[7..0] bits are: ValuesAfterColl
+							  // reserved CollPosNotValid CollPos[4:0]
+				if (valueOfCollReg & 0x20) { // CollPosNotValid
+					return STATUS_COLLISION; // Without a valid collision
+											 // position we cannot continue
+				}
+				uint8_t collisionPos =
+					valueOfCollReg & 0x1F; // Values 0-31, 0 means bit 32.
+				if (collisionPos == 0) {
+					collisionPos = 32;
+				}
+				if (collisionPos <=
+					currentLevelKnownBits) { // No progress - should not happen
+					return STATUS_INTERNAL_ERROR;
+				}
+				// Choose the PICC with the bit set.
+				currentLevelKnownBits = collisionPos;
+				count = currentLevelKnownBits % 8; // The bit to modify
+				checkBit = (currentLevelKnownBits - 1) % 8;
+				index = 1 + (currentLevelKnownBits / 8) +
+						(count ? 1 : 0); // First byte is index 0.
+				buffer[index] |= (1 << checkBit);
+			} else if (result != STATUS_OK) {
+				return result;
+			} else {                               // STATUS_OK
+				if (currentLevelKnownBits >= 32) { // This was a SELECT.
+					selectDone = true;             // No more anticollision
+					// We continue below outside the while.
+				} else { // This was an ANTICOLLISION.
+					// We now have all 32 bits of the UID in this Cascade Level
+					currentLevelKnownBits = 32;
+					// Run loop again to do the SELECT.
+				}
+			}
+		} // End of while (!selectDone)
+
+		// We do not check the CBB - it was constructed by us above.
+
+		// Copy the found UID bytes from buffer[] to uid->uidByte[]
+		index = (buffer[2] == PICC_CMD_CT) ? 3 : 2; // source index in buffer[]
+		bytesToCopy = (buffer[2] == PICC_CMD_CT) ? 3 : 4;
+		for (count = 0; count < bytesToCopy; count++) {
+			uid.uidByte[uidIndex + count] = buffer[index++];
+		}
+
+		// Check response SAK (Select Acknowledge)
+		if (responseLength != 3 ||
+			txLastBits != 0) { // SAK must be exactly 24 bits (1 byte + CRC_A).
+			return STATUS_ERROR;
+		}
+		// Verify CRC_A - do our own calculation and store the control in
+		// buffer[2..3] - those bytes are not needed anymore.
+		result = calculateCRC(responseBuffer, 1, &buffer[2]);
+		if (result != STATUS_OK) {
+			return result;
+		}
+		if ((buffer[2] != responseBuffer[1]) ||
+			(buffer[3] != responseBuffer[2])) {
+			return STATUS_CRC_WRONG;
+		}
+		if (responseBuffer[0] &
+			0x04) { // Cascade bit set - UID not complete yes
+			cascadeLevel++;
+		} else {
+			uidComplete = true;
+			uid.sak = responseBuffer[0];
+		}
+	} // End of while (!uidComplete)
+
+	// Set correct uid->size
+	uid.size = 3 * cascadeLevel + 1;
+
+	return STATUS_OK;
+} // End PICC_Select()

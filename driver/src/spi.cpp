@@ -28,12 +28,12 @@ spi::spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter)
 	/*
 	 * Set the given SPI mode.
 	 */
-	int res = ioctl(fd, SPI_IOC_WR_MODE, mode);
+	int res = ioctl(fd, SPI_IOC_WR_MODE, &mode);
 	if (res < 0) {
 		throw std::runtime_error("failed to set SPI write mode\r\n");
 	}
 
-	res = ioctl(fd, SPI_IOC_RD_MODE, mode);
+	res = ioctl(fd, SPI_IOC_RD_MODE, &mode);
 	if (res < 0) {
 		throw std::runtime_error("failed to set SPI read mode\r\n");
 	}
@@ -41,12 +41,12 @@ spi::spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter)
 	/*
 	 * Set the given SPI bits-per-word.
 	 */
-	res = ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, bpw);
+	res = ioctl(fd, SPI_IOC_WR_BITS_PER_WORD, &bpw);
 	if (res < 0) {
 		throw std::runtime_error("failed to set SPI write bits-per-word\r\n");
 	}
 
-	res = ioctl(fd, SPI_IOC_RD_BITS_PER_WORD, bpw);
+	res = ioctl(fd, SPI_IOC_RD_BITS_PER_WORD, &bpw);
 	if (res < 0) {
 		throw std::runtime_error("failed to set SPI read bits-per-word\r\n");
 	}
@@ -54,12 +54,12 @@ spi::spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter)
 	/*
 	 * Set the given SPI speed.
 	 */
-	res = ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, speed);
+	res = ioctl(fd, SPI_IOC_WR_MAX_SPEED_HZ, &speed);
 	if (res < 0) {
 		throw std::runtime_error("failed to set SPI write speed\r\n");
 	}
 
-	res = ioctl(fd, SPI_IOC_RD_MAX_SPEED_HZ, speed);
+	res = ioctl(fd, SPI_IOC_RD_MAX_SPEED_HZ, &speed);
 	if (res < 0) {
 		throw std::runtime_error("failed to set SPI read speed\r\n");
 	}
@@ -88,7 +88,7 @@ int spi::transfer(
 	return res;
 }
 
-int spi::read(uint8_t reg, uint8_t *buf, int buf_len) const {
+int spi::readn(uint8_t reg, uint8_t *buf, int buf_len) const {
 	int full_buf_len;
 	int res;
 
@@ -116,13 +116,15 @@ int spi::read(uint8_t reg, uint8_t *buf, int buf_len) const {
 
 uint8_t spi::read_byte(uint8_t reg) const {
 	uint8_t data = 0;
-	if (read(reg, &data, 1) != 0) {
+	int res = readn(reg, &data, 1);
+	if (res != 0) {
+		printf(" %d ", res);
 		throw std::runtime_error("SPI read fail");
 	}
 	return data;
 }
 
-int spi::write(uint8_t reg, uint8_t *buf, int buf_len) const {
+int spi::writen(uint8_t reg, uint8_t *buf, int buf_len) const {
 	int full_buf_len;
 
 	/*
@@ -146,5 +148,5 @@ int spi::write(uint8_t reg, uint8_t *buf, int buf_len) const {
 }
 
 int spi::write_byte(uint8_t reg, uint8_t value) const {
-	return write(reg, &value, 1);
+	return writen(reg, &value, 1);
 }
