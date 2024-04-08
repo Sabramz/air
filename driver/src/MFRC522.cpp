@@ -67,22 +67,12 @@ MFRC522::MFRC522(const gpiod::chip &chip,
 	: interrupt(chip.get_line(inter_pin)),
 	  csLine(chip.get_line(chipSelectPin)),
 	  rstLine(chip.get_line(resetPowerDownPin)),
-	  spid(spi(SPI_MODE_0, 8, 4000000U, csLine, adapter.data())) {
+	  spid(spi(SPI_MODE_0, 8, 4000000U, adapter.data())) {
 	interrupt.request({
 		.consumer = GPIO_CONSUMER,
 		.request_type = gpiod::line_request::EVENT_RISING_EDGE,
 		.flags = 0,
 	});
-
-	csLine.request({
-		.consumer = GPIO_CONSUMER,
-		.request_type = gpiod::line_request::DIRECTION_OUTPUT,
-		.flags = 0,
-	});
-
-	rstLine.request({.consumer = GPIO_CONSUMER,
-		.request_type = gpiod::line_request::DIRECTION_INPUT,
-		.flags = 0});
 
 } // End constructor
 
@@ -99,10 +89,10 @@ void MFRC522::PCD_WriteRegister(
 		reg,   ///< The register to write to. One of the PCD_Register enums.
 	byte value ///< The value to write.
 ) {
-	csLine.set_value(0);         // Select slave
+	// csLine.set_value(0);         // Select slave
 	spid.write_byte(reg, value); // MSB == 0 is for writing. LSB is not used in
 								 // address. Datasheet section 8.1.2.3.
-	csLine.set_value(1);         // Release slave again
+	// csLine.set_value(1);         // Release slave again
 } // End PCD_WriteRegister()
 
 /**
@@ -115,9 +105,9 @@ void MFRC522::PCD_WriteRegister(
 	byte count,  ///< The number of bytes to write to the register
 	byte *values ///< The values to write. Byte array.
 ) {
-	csLine.set_value(0); // Select slave
+	// csLine.set_value(0); // Select slave
 	spid.writen(reg, values, count);
-	csLine.set_value(1); // Release slave again
+	// csLine.set_value(1); // Release slave again
 } // End PCD_WriteRegister()
 
 /**
@@ -128,11 +118,11 @@ byte MFRC522::PCD_ReadRegister(PCD_Register
 		reg ///< The register to read from. One of the PCD_Register enums.
 ) {
 	byte value;
-	csLine.set_value(0);        // Select slave
+	// csLine.set_value(0);        // Select slave
 	spid.read_byte(0x80 | reg); // MSB == 1 is for reading. LSB is not used in
 								// address. Datasheet section 8.1.2.3.
 	// value = SPI.transfer(0);  // Read the value back. Send 0 to stop reading.
-	csLine.set_value(1); // Release slave again
+	// csLine.set_value(1); // Release slave again
 	return value;
 } // End PCD_ReadRegister()
 
@@ -155,8 +145,8 @@ void MFRC522::PCD_ReadRegister(
 	byte address = 0x80 | reg; // MSB == 1 is for reading. LSB is not used in
 							   // address. Datasheet section 8.1.2.3.
 	byte index = 0;            // Index in values array.
-	csLine.set_value(0);       // Select slave
-	count--;                   // One read is performed outside of the loop
+	// csLine.set_value(0);       // Select slave
+	count--; // One read is performed outside of the loop
 	// SPI.transfer(address); // Tell MFRC522 which address we want to read
 	if (rxAlign) { // Only update bit positions rxAlign..7 in values[0]
 		// Create bit mask for bit positions rxAlign..7
@@ -177,7 +167,7 @@ void MFRC522::PCD_ReadRegister(
 	}
 	values[index] =
 		spid.read_byte(address); // Read the final byte. Send 0 to stop reading.
-	csLine.set_value(1);         // Release slave again
+	// csLine.set_value(1);         // Release slave again
 } // End PCD_ReadRegister()
 
 /**
@@ -265,21 +255,22 @@ MFRC522::StatusCode MFRC522::PCD_CalculateCRC(
  * Initializes the MFRC522 chip.
  */
 void MFRC522::PCD_Init() {
-	bool hardReset = false;
+	// csLine.request({
+	// 	.consumer = GPIO_CONSUMER,
+	// 	.request_type = gpiod::line_request::DIRECTION_OUTPUT,
+	// 	.flags = 0,
+	// });
 
-	// Set the chipSelectPin as digital output, do not select the slave yet
 	rstLine.request({.consumer = GPIO_CONSUMER,
-		.request_type = gpiod::line_request::DIRECTION_OUTPUT,
+		.request_type = gpiod::line_request::DIRECTION_INPUT,
 		.flags = 0});
-	csLine.set_value(1);
+
+	bool hardReset = false;
 
 	// If a valid pin number has been set, pull device out of power down / reset
 	// state.
 	// First set the resetPowerDownPin as digital input, to check the
 	// MFRC522 power down mode.
-	rstLine.request({.consumer = GPIO_CONSUMER,
-		.request_type = gpiod::line_request::DIRECTION_INPUT,
-		.flags = 0});
 
 	if (rstLine.get_value() == LOW) { // The MFRC522 chip is in power down mode.
 		rstLine.request({.consumer = GPIO_CONSUMER,
@@ -1671,37 +1662,37 @@ MFRC522::PICC_Type MFRC522::PICC_GetType(
  * Dumps debug info about the connected PCD to Serial.
  * Shows all known firmware versions
  */
-/* void MFRC522::PCD_DumpVersionToSerial() {
+void MFRC522::PCD_DumpVersionToSerial() {
 	// Get the MFRC522 firmware version
 	byte v = PCD_ReadRegister(VersionReg);
-	Serial.print(F("Firmware Version: 0x"));
-	Serial.print(v, HEX);
+	printf("Firmware Version: 0x");
+	printf("%X", v);
 	// Lookup which version
 	switch (v) {
 	case 0x88:
-		Serial.println(F(" = (clone)"));
+		printf(" = (clone)");
 		break;
 	case 0x90:
-		Serial.println(F(" = v0.0"));
+		printf(" = v0.0");
 		break;
 	case 0x91:
-		Serial.println(F(" = v1.0"));
+		printf(" = v1.0");
 		break;
 	case 0x92:
-		Serial.println(F(" = v2.0"));
+		printf(" = v2.0");
 		break;
 	case 0x12:
-		Serial.println(F(" = counterfeit chip"));
+		printf(" = counterfeit chip");
 		break;
 	default:
-		Serial.println(F(" = (unknown)"));
+		printf(" = (unknown)");
 	}
 	// When 0x00 or 0xFF is returned, communication probably failed
 	if ((v == 0x00) || (v == 0xFF))
-		Serial.println(F("WARNING: Communication failure, is the MFRC522 "
-						 "properly connected?"));
+		printf("WARNING: Communication failure, is the MFRC522 "
+						 "properly connected?");
 } // End PCD_DumpVersionToSerial()
- */
+
 /**
  * Dumps debug info about the selected PICC to Serial.
  * On success the PICC is halted after dumping the data.

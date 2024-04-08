@@ -14,14 +14,9 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-spi::spi(uint8_t mode,
-	uint8_t bpw,
-	uint32_t speed,
-	gpiod::line chipSel,
-	char *adapter)
+spi::spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter)
 	: bpw(bpw),
-	  speed(speed),
-	  csLine(chipSel) {
+	  speed(speed) {
 	char filename[32];
 
 	snprintf(filename, 32, "/dev/spidev%s", adapter);
@@ -87,16 +82,12 @@ int spi::transfer(
 		.rx_nbits = 0};
 	int res;
 
-	csLine.set_value(0);
-
 	res = ioctl(fd, SPI_IOC_MESSAGE(1), &transfer);
 	if (res < 0) {
 		std::string res_str = std::to_string(res);
 		throw std::runtime_error(
 			std::string("SPI TRANSFER FAIL CODE ") + res_str);
 	}
-
-	csLine.set_value(1);
 
 	return res;
 }
@@ -111,7 +102,7 @@ int spi::readn(uint8_t reg, uint8_t *buf, int buf_len) const {
 	 */
 	full_buf_len = buf_len + 1;
 	uint8_t full_buf[full_buf_len];
-	full_buf[0] = 0x80 | reg;
+	full_buf[0] = reg;
 
 	/*
 	 * Transfer the instruction, register address and data.

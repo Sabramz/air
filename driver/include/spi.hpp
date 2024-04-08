@@ -24,11 +24,7 @@ public:
 	 * @param[in] speed - SPI speed
 	 * @param[in] adapter - The number of the I2C adapter.
 	 */
-	spi(uint8_t mode,
-		uint8_t bpw,
-		uint32_t speed,
-		gpiod::line csLine,
-		char *adapter);
+	spi(uint8_t mode, uint8_t bpw, uint32_t speed, char *adapter);
 
 	~spi();
 
