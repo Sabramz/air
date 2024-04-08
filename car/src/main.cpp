@@ -18,12 +18,18 @@ static const std::vector<menu_item> car_menu = {
 int main() {
 	rc552 rfid(gpio_pins, RASPI_7, RASPI_38, RASPI_40, "0.0");
 
-	for (int i = 0; i < 50; i++) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	while(r)
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
 		if (rfid.PICC_IsNewCardPresent()) {
-			if (rfid.PICC_ReadCardSerial()) {
-				rfid.PICC_DumpMifareClassicToSerial();
-			}
+			printf(" CARD PRESENT ");
+			// if (rfid.PICC_ReadCardSerial()) {
+			// 	printf(" IT WORKED ");
+			// 	// rfid.PICC_DumpMifareClassicToSerial();
+			// } else {
+			//     printf(" GET FUCKED ");
+			// }
+		} else {
+			printf(" CARD NOT PRESENT ");
 		}
 	}
 

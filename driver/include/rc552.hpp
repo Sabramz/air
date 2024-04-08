@@ -27,6 +27,8 @@ public:
 					 // after successful selection.
 	};
 
+	std::unique_ptr<Uid> uid; // Used by PICC_ReadCardSerial().
+
 	/**
 	 * @brief Initializer
 	 *
@@ -78,18 +80,20 @@ public:
 	int calculateCRC(uint8_t *data, uint8_t length, uint8_t *result);
 
 	int transcieveData(
-		uint8_t *sendData,  ///< Pointer to the data to transfer to the FIFO.
-		uint8_t sendLen,    ///< Number of bytes to transfer to the FIFO.
-		uint8_t *backData,  ///< nullptr or pointer to buffer if data should be
-							///< read back after executing the command.
-		uint8_t *backLen,   ///< In: Max number of bytes to write to *backData.
-							///< Out: The number of bytes returned.
-		uint8_t *validBits, ///< In/Out: The number of valid bits in the last
-							///< byte. 0 for 8 valid bits. Default nullptr.
-		uint8_t rxAlign,    ///< In: Defines the bit position in backData[0] for
-							///< the first bit received. Default 0.
-		bool checkCRC ///< In: True => The last two bytes of the response is
-					  ///< assumed to be a CRC_A that must be validated.
+		uint8_t *sendData, ///< Pointer to the data to transfer to the FIFO.
+		uint8_t sendLen,   ///< Number of bytes to transfer to the FIFO.
+		uint8_t *backData, ///< nullptr or pointer to buffer if data should be
+						   ///< read back after executing the command.
+		uint8_t *backLen,  ///< In: Max number of bytes to write to *backData.
+						   ///< Out: The number of bytes returned.
+		uint8_t *validBits =
+			nullptr,         ///< In/Out: The number of valid bits in the last
+							 ///< byte. 0 for 8 valid bits. Default nullptr.
+		uint8_t rxAlign = 0, ///< In: Defines the bit position in backData[0]
+							 ///< for the first bit received. Default 0.
+		bool checkCRC =
+			false ///< In: True => The last two bytes of the response is
+				  ///< assumed to be a CRC_A that must be validated.
 	);
 
 	int PCD_CommunicateWithPICC(
@@ -173,7 +177,7 @@ public:
 	 *
 	 * @return STATUS_OK on success, STATUS_??? otherwise.
 	 */
-	int PICC_Select(uint8_t validBits);
+	int PICC_Select(uint8_t validBits = 0);
 
 	/**
 	 * Instructs a PICC in state ACTIVE(*) to go to state HALT.
@@ -229,7 +233,6 @@ public:
 	);
 
 private:
-	Uid uid; // Used by PICC_ReadCardSerial().
 	gpiod::line interrupt;
 	std::unique_ptr<std::thread> interrupt_thread;
 	std::atomic_bool active = true;

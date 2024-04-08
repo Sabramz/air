@@ -80,7 +80,7 @@ int spi::transfer(
 		.rx_buf = (uint64_t)read_buf,
 		.len = buf_len,
 		.speed_hz = speed,
-        .delay_usecs = 0,
+		.delay_usecs = 0,
 		.bits_per_word = bpw,
 		.cs_change = 0,
 		.tx_nbits = 0,
@@ -109,10 +109,9 @@ int spi::readn(uint8_t reg, uint8_t *buf, int buf_len) const {
 	 * Allocate a buffer that contains the instruction and
 	 * the register address as the first element.
 	 */
-	full_buf_len = buf_len + 2;
+	full_buf_len = buf_len + 1;
 	uint8_t full_buf[full_buf_len];
-	full_buf[0] = 0x0B;
-	full_buf[1] = 0x80 | reg;
+	full_buf[0] = 0x80 | reg;
 
 	/*
 	 * Transfer the instruction, register address and data.
@@ -122,7 +121,7 @@ int spi::readn(uint8_t reg, uint8_t *buf, int buf_len) const {
 	/*
 	 * Copy the read data into the buffer.
 	 */
-	memcpy(buf, full_buf + 2, buf_len);
+	memcpy(buf, full_buf + 1, buf_len);
 
 	return res;
 }
@@ -130,10 +129,6 @@ int spi::readn(uint8_t reg, uint8_t *buf, int buf_len) const {
 uint8_t spi::read_byte(uint8_t reg) const {
 	uint8_t data = 0;
 	int res = readn(reg, &data, 1);
-	if (res != 0) {
-		std::string res_str = std::to_string(res);
-		throw std::runtime_error(std::string("SPI read fail ") + res_str);
-	}
 	return data;
 }
 
@@ -144,15 +139,14 @@ int spi::writen(uint8_t reg, uint8_t *buf, int buf_len) const {
 	 * Allocate a buffer that contains the instruction and
 	 * the register address as the first two elements.
 	 */
-	full_buf_len = buf_len + 2;
+	full_buf_len = buf_len + 1;
 	uint8_t full_buf[full_buf_len];
-	full_buf[0] = 0xA;
-	full_buf[1] = reg;
+	full_buf[0] = reg;
 
 	/*
 	 * Copy the data to be written into the full buffer.
 	 */
-	memcpy(full_buf + 2, buf, buf_len);
+	memcpy(full_buf + 1, buf, buf_len);
 
 	/*
 	 * Transfer the instruction, register address and data.

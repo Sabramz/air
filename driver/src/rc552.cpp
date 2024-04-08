@@ -86,17 +86,20 @@ static constexpr int STATUS_INVALID = 3;
 static constexpr int STATUS_INTERNAL_ERROR = 4;
 static constexpr int STATUS_COLLISION = 5;
 static constexpr int STATUS_CRC_WRONG = 6;
+static constexpr int STATUS_NO_ROOM = 7;
+static constexpr int STATUS_MIFARE_NACK = 8;
 
 rc552::rc552(const gpiod::chip &chip,
 	uint32_t inter_pin,
 	uint32_t csPin,
 	uint32_t rstPin,
 	std::string adapter)
-	: uid(4, {0}, 0),
-	  interrupt(chip.get_line(inter_pin)),
+	: interrupt(chip.get_line(inter_pin)),
 	  csLine(chip.get_line(csPin)),
 	  rstLine(chip.get_line(rstPin)),
 	  spid(spi(SPI_MODE_0, 8, 100000U * 8, csLine, adapter.data())) {
+	uid = std::make_unique<Uid>(Uid{4, {0}, 0});
+
 	interrupt.request({
 		.consumer = GPIO_CONSUMER,
 		.request_type = gpiod::line_request::EVENT_RISING_EDGE,
@@ -147,18 +150,18 @@ rc552::rc552(const gpiod::chip &chip,
 		} while ((spid.read_byte(commandReg) & (1 << 4)) && (++count) < 3);
 	}
 
-	// Chesk to see if spi is working
-	uint8_t res = spid.read_byte(errorReg);
-	if (res != 0x80) {
-		throw std::runtime_error(
-			"RC552 spi read failure " + std::to_string(res));
-	}
-
 	// Reset baud rates
 	spid.write_byte(TxModeReg, 0x00);
 	spid.write_byte(RxModeReg, 0x00);
 	// Reset ModWidthReg
 	spid.write_byte(ModWidthReg, 0x26);
+
+    if (spid.read_byte(ModWidthReg) == 0x26) {
+        printf("SPI WORKS ");
+    } else {
+        printf("SPI BROKEN ");
+    }
+    
 
 	// When communicating with a PICC we need a timeout if something goes wrong.
 	// f_timer = 13.56 MHz / (2*TPreScaler+1) where TPreScaler =
@@ -232,9 +235,9 @@ int rc552::transcieveData(uint8_t *sendData,
 	uint8_t sendLen,
 	uint8_t *backData,
 	uint8_t *backLen,
-	uint8_t *validBits = nullptr,
-	uint8_t rxAlign = 0,
-	bool checkCRC = false) {
+	uint8_t *validBits,
+	uint8_t rxAlign,
+	bool checkCRC) {
 	uint8_t waitIRq = 0x30; // RxIRq and IdleIRq
 	return PCD_CommunicateWithPICC(transcieve, waitIRq, sendData, sendLen,
 		backData, backLen, validBits, rxAlign, checkCRC);
@@ -285,25 +288,24 @@ int rc552::PCD_CommunicateWithPICC(uint8_t command,
 	// When they are set in the ComIrqReg register, then the command is
 	// considered complete. If the command is not indicated as complete in
 	// ~36ms, then consider the command as timed out.
+
 	bool completed = false;
 	std::this_thread::sleep_for(std::chrono::milliseconds(36));
 
-	// ComIrqReg[7..0] bits are: Set1 TxIRq RxIRq IdleIRq
-	// HiAlertIRq LoAlertIRq ErrIRq TimerIRq
-	uint8_t irqReg = spid.read_byte(comIrqReg);
-
-	// One of the interrupts that signal success has been set.
-	if ((irqReg & waitIRq) > 0) {
+	uint8_t irqReg = spid.read_byte(
+		comIrqReg); // ComIrqReg[7..0] bits are: Set1 TxIRq RxIRq IdleIRq
+					// HiAlertIRq LoAlertIRq ErrIRq TimerIRq
+	if ((irqReg & waitIRq) >
+		0) { // One of the interrupts that signal success has been set.
 		completed = true;
 	}
-
 	if ((irqReg & 0x01) > 0) { // Timer interrupt - nothing received in 25ms
-		return 1;
+		return STATUS_TIMEOUT;
 	}
 
 	// 36ms and nothing happened. Communication with the MFRC522 might be down.
 	if (!completed) {
-		return 2;
+		return STATUS_TIMEOUT;
 	}
 
 	// Stop now if any errors except collisions were detected.
@@ -311,7 +313,7 @@ int rc552::PCD_CommunicateWithPICC(uint8_t command,
 	uint8_t errorRegValue = spid.read_byte(errorReg);
 	// CollErr CRCErr ParityErr ProtocolErr
 	if ((errorRegValue & 0x13) > 0) { // BufferOvfl ParityErr ProtocolErr
-		return 3;
+		return STATUS_ERROR;
 	}
 
 	uint8_t _validBits = 0;
@@ -321,7 +323,7 @@ int rc552::PCD_CommunicateWithPICC(uint8_t command,
 		uint8_t fifoLevel =
 			spid.read_byte(FIFOLevelReg); // Number of bytes in the FIFO
 		if (fifoLevel > *backLen) {
-			return 5; // no room
+			return STATUS_NO_ROOM; // no room
 		}
 		*backLen = fifoLevel; // Number of bytes returned
 		spid.readn(
@@ -337,18 +339,35 @@ int rc552::PCD_CommunicateWithPICC(uint8_t command,
 
 	// Tell about collisions
 	if ((errorRegValue & 0x08) > 0) { // CollErr
-		return 6;
+		return STATUS_COLLISION;
 	}
 
 	// Perform CRC_A validation if requested.
 	if (backData != nullptr && backLen != nullptr && checkCRC) {
-		int res = validateCRCA(backData, backLen, &_validBits);
-		if (res != 0) {
-			return res;
+		// In this case a MIFARE Classic NAK is not OK.
+		if (*backLen == 1 && _validBits == 4) {
+			return STATUS_MIFARE_NACK;
+		}
+		// We need at least the CRC_A value and all 8 bits of the last byte must
+		// be received.
+		if (*backLen < 2 || _validBits != 0) {
+			return STATUS_CRC_WRONG;
+		}
+		// Verify CRC_A - do our own calculation and store the control in
+		// controlBuffer.
+		uint8_t controlBuffer[2];
+		int status =
+			calculateCRC(&backData[0], *backLen - 2, &controlBuffer[0]);
+		if (status != STATUS_OK) {
+			return status;
+		}
+		if ((backData[*backLen - 2] != controlBuffer[0]) ||
+			(backData[*backLen - 1] != controlBuffer[1])) {
+			return STATUS_CRC_WRONG;
 		}
 	}
 
-	return 0;
+	return STATUS_OK;
 }
 
 int rc552::calculateCRC(uint8_t *data, uint8_t length, uint8_t *result) {
@@ -381,10 +400,10 @@ int rc552::calculateCRC(uint8_t *data, uint8_t length, uint8_t *result) {
 		// Transfer the result from the registers to the result buffer
 		result[0] = spid.read_byte(CRCResultRegL);
 		result[1] = spid.read_byte(CRCResultRegH);
-		return 0;
+		return STATUS_OK;
 	}
 
-	return 7;
+	return STATUS_TIMEOUT;
 }
 
 /**
@@ -440,7 +459,7 @@ bool rc552::PICC_IsNewCardPresent() {
 	spid.write_byte(ModWidthReg, 0x26);
 
 	int result = PICC_RequestA(bufferATQA, &bufferSize);
-	return result == 0 || result == 1;
+	return result == STATUS_OK || result == STATUS_COLLISION;
 } // End PICC_IsNewCardPresent()
 
 int rc552::PICC_RequestA(
@@ -464,7 +483,7 @@ int rc552::PICC_REQA_or_WUPA(
 
 	if (bufferATQA == nullptr ||
 		*bufferSize < 2) { // The ATQA response is 2 bytes long.
-		return 4;
+		return STATUS_NO_ROOM;
 	}
 
 	// ValuesAfterColl=1 => Bits received after collision
@@ -473,15 +492,14 @@ int rc552::PICC_REQA_or_WUPA(
 	validBits =
 		7; // For REQA and WUPA we need the short frame format - transmit only 7
 		   // bits of the last (and only) byte. TxLastBits = BitFramingReg[2..0]
-	status = transcieveData(
-		&command, 1, bufferATQA, bufferSize, &validBits, 0, false);
-	if (status != 0) {
+	status = transcieveData(&command, 1, bufferATQA, bufferSize, &validBits);
+	if (status != STATUS_OK) {
 		return status;
 	}
 	if (*bufferSize != 2 || validBits != 0) { // ATQA must be exactly 16 bits.
-		return 1;
+		return STATUS_ERROR;
 	}
-	return 0;
+	return STATUS_OK;
 } // End PICC_REQA_or_WUPA()
 
 /**
@@ -506,8 +524,8 @@ void rc552::PCD_ClearRegisterBitMask(
  * @return bool
  */
 bool rc552::PICC_ReadCardSerial() {
-	int result = PICC_Select(0);
-	return result == 0;
+	int result = PICC_Select();
+	return result == STATUS_OK;
 } // End
 
 /**
@@ -767,7 +785,7 @@ int rc552::PCD_Authenticate(
 	// shortcut activation, but it requires cascade tag (CT) byte, that is not
 	// part of uid.
 	for (uint8_t i = 0; i < 4; i++) { // The last 4 bytes of the UID
-		sendData[8 + i] = uid.uidByte[i + uid.size - 4];
+		sendData[8 + i] = uid->uidByte[i + uid->size - 4];
 	}
 
 	// Start the authentication.
@@ -797,9 +815,8 @@ int rc552::PCD_Authenticate(
  * @return STATUS_OK on success, STATUS_??? otherwise.
  */
 int rc552::PICC_Select(
-	uint8_t validBits =
-		0 ///< The number of known UID bits supplied in *uid. Normally 0. If set
-		  ///< you must also supply uid->size.
+	uint8_t validBits ///< The number of known UID bits supplied in *uid.
+					  ///< Normally 0. If set you must also supply uid->size.
 ) {
 	bool uidComplete;
 	bool selectDone;
@@ -826,14 +843,14 @@ int rc552::PICC_Select(
 
 	// Description of buffer structure:
 	//		Byte 0: SEL 				Indicates the Cascade Level:
-	// PICC_CMD_SEL_CL1, PICC_CMD_SEL_CL2 or PICC_CMD_SEL_CL3 		Byte 1: NVB
-	// Number of Valid Bits (in complete command, not just the UID): High
-	// nibble: complete bytes, Low nibble: Extra bits. 		Byte 2: UID-data or
-	// CT		See explanation below. CT means Cascade Tag. 		Byte 3:
-	// UID-data 		Byte 4: UID-data 		Byte 5: UID-data 		Byte 6:
-	// BCC
-	// Block Check Character - XOR of bytes 2-5 		Byte 7: CRC_A 		Byte
-	// 8: CRC_A
+	//PICC_CMD_SEL_CL1, PICC_CMD_SEL_CL2 or PICC_CMD_SEL_CL3 		Byte 1: NVB
+	//Number of Valid Bits (in complete command, not just the UID): High nibble:
+	//complete bytes, Low nibble: Extra bits. 		Byte 2: UID-data or CT		See
+	//explanation below. CT means Cascade Tag. 		Byte 3: UID-data 		Byte 4: UID-data
+	//		Byte 5: UID-data
+	//		Byte 6: BCC					Block Check Character - XOR of bytes 2-5
+	//		Byte 7: CRC_A
+	//		Byte 8: CRC_A
 	// The BCC and CRC_A are only transmitted if we know all the UID bits of the
 	// current Cascade Level.
 	//
@@ -869,7 +886,8 @@ int rc552::PICC_Select(
 			uidIndex = 0;
 			useCascadeTag =
 				validBits &&
-				uid.size > 4; // When we know that the UID has more than 4 bytes
+				uid->size >
+					4; // When we know that the UID has more than 4 bytes
 			break;
 
 		case 2:
@@ -877,7 +895,8 @@ int rc552::PICC_Select(
 			uidIndex = 3;
 			useCascadeTag =
 				validBits &&
-				uid.size > 7; // When we know that the UID has more than 7 bytes
+				uid->size >
+					7; // When we know that the UID has more than 7 bytes
 			break;
 
 		case 3:
@@ -915,7 +934,7 @@ int rc552::PICC_Select(
 				bytesToCopy = maxBytes;
 			}
 			for (count = 0; count < bytesToCopy; count++) {
-				buffer[index++] = uid.uidByte[uidIndex + count];
+				buffer[index++] = uid->uidByte[uidIndex + count];
 			}
 		}
 		// Now that the data has been copied we need to include the 8 bits in CT
@@ -980,8 +999,8 @@ int rc552::PICC_Select(
 				uint8_t valueOfCollReg = spid.read_byte(
 					collReg); // CollReg[7..0] bits are: ValuesAfterColl
 							  // reserved CollPosNotValid CollPos[4:0]
-				if (valueOfCollReg & 0x20) { // CollPosNotValid
-					return STATUS_COLLISION; // Without a valid collision
+				if ((valueOfCollReg & 0x20) > 0) { // CollPosNotValid
+					return STATUS_COLLISION;       // Without a valid collision
 											 // position we cannot continue
 				}
 				uint8_t collisionPos =
@@ -1020,7 +1039,7 @@ int rc552::PICC_Select(
 		index = (buffer[2] == PICC_CMD_CT) ? 3 : 2; // source index in buffer[]
 		bytesToCopy = (buffer[2] == PICC_CMD_CT) ? 3 : 4;
 		for (count = 0; count < bytesToCopy; count++) {
-			uid.uidByte[uidIndex + count] = buffer[index++];
+			uid->uidByte[uidIndex + count] = buffer[index++];
 		}
 
 		// Check response SAK (Select Acknowledge)
@@ -1038,17 +1057,17 @@ int rc552::PICC_Select(
 			(buffer[3] != responseBuffer[2])) {
 			return STATUS_CRC_WRONG;
 		}
-		if (responseBuffer[0] &
-			0x04) { // Cascade bit set - UID not complete yes
+		if ((responseBuffer[0] & 0x04) >
+			0) { // Cascade bit set - UID not complete yes
 			cascadeLevel++;
 		} else {
 			uidComplete = true;
-			uid.sak = responseBuffer[0];
+			uid->sak = responseBuffer[0];
 		}
 	} // End of while (!uidComplete)
 
 	// Set correct uid->size
-	uid.size = 3 * cascadeLevel + 1;
+	uid->size = 3 * cascadeLevel + 1;
 
 	return STATUS_OK;
 } // End PICC_Select()
