@@ -20,11 +20,9 @@
 
 static void prompt_enter();
 static void tdma_slots();
-static void read_card();
 
 static const std::vector<menu_item> demos = {
-	{.text = "TDMA Slots", .action = &tdma_slots},
-	{.text = "Read RFID card", .action = &read_card}};
+	{.text = "TDMA Slots", .action = &tdma_slots}};
 
 void demo_submenu() {
 	show_menu("Car Demos", demos, true);
@@ -135,21 +133,6 @@ void tdma_slots() {
 			std::cout << "Received: " << response << '\n';
 		} else {
 			std::cout << "No response" << '\n';
-		}
-	}
-}
-
-void read_card() {
-	printf("TEST");
-
-	rc552 rfid(gpio_pins, RASPI_38, RASPI_40, RASPI_7, "0.0");
-
-	for (int i = 0; i < 50; i++) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		if (rfid.PICC_IsNewCardPresent()) {
-			if (rfid.PICC_ReadCardSerial()) {
-				rfid.PICC_DumpMifareClassicToSerial();
-			}
 		}
 	}
 }
